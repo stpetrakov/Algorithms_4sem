@@ -1,103 +1,166 @@
-#include <iostream>
-#include <vector>
-#include <string>
-#include <algorithm>
+// pattern_matching.cpp
+// Linear-time wildcard pattern matching using an Extended Z-algorithm
+// '?' inside the pattern matches any single character in the text.
 
-inline bool eq_pat(char pa, char pb) {
-    return pa == '?' || pa == pb;
+#include <algorithm>
+#include <iostream>
+#include <string>
+#include <vector>
+
+//--------------------------------------------------------------
+//  Utility
+//--------------------------------------------------------------
+/// @brief Return true iff patternChar matches textChar under the wildcard rules.
+inline bool isWildcardMatch(char patternChar, char textChar) {
+    return patternChar == '?' || patternChar == textChar;
 }
 
-std::vector<int> build_next(const std::string &P) {
-    int m = P.size();
-    std::vector<int> nxt(m);
-    nxt[0] = m;
-    int l = 0, r = 0;
-    for (int i = 1; i < m; i++) {
-        int k = 0;
-        if (i <= r)
-            k = std::min(nxt[i - l], r - i + 1);
-        while (i + k < m && eq_pat(P[k], P[i + k]))
-            k++;
-        nxt[i] = k;
-        if (i + k - 1 > r) {
-            l = i;
-            r = i + k - 1;
+//--------------------------------------------------------------
+//  Z-box on the pattern itself (classic Z / "next" array)
+//--------------------------------------------------------------
+/// @brief Build the classical Z-array for the pattern, but with wildcard support.
+///        z[i] = longest length such that pattern[0 .. z[i) == pattern[i .. i+z[i))
+std::vector<int> buildZArray(const std::string &pattern) {
+    const int patternLength = static_cast<int>(pattern.size());
+    std::vector<int> z(patternLength);
+    z[0] = patternLength;                       // by definition
+
+    int left = 0, right = 0;                    // current [left, right] Z-box
+    for (int idx = 1; idx < patternLength; ++idx) {
+        int currentMatchLen = 0;
+
+        // 1. possible reuse of previous Z-box information
+        if (idx <= right) {
+            const int mirrored = idx - left;    // position inside current Z-box
+            currentMatchLen = std::min(z[mirrored], right - idx + 1);
+        }
+
+        // 2. explicit comparisons beyond the currentMatchLen prefix
+        while (idx + currentMatchLen < patternLength &&
+               isWildcardMatch(pattern[currentMatchLen], pattern[idx + currentMatchLen])) {
+            ++currentMatchLen;
+        }
+        z[idx] = currentMatchLen;
+
+        // 3. extend the Z-box if we improved it
+        if (idx + currentMatchLen - 1 > right) {
+            left  = idx;
+            right = idx + currentMatchLen - 1;
         }
     }
-    return nxt;
+    return z;
 }
 
-std::vector<int> build_ext(const std::string &P, const std::string &T, const std::vector<int> &nxt) {
-    int m = P.size(), n = T.size();
-    std::vector<int> ext(n);
-    int l = 0, r = -1;
-    for (int i = 0; i < n; i++) {
-        int k = 0;
-        if (i <= r) {
-            k = std::min(nxt[i - l], r - i + 1);
+//--------------------------------------------------------------
+//  Extended Z (pattern vs. text)   —   the core of ex-KMP
+//--------------------------------------------------------------
+/// @brief Compute ext[i] = longest prefix of pattern matching text starting at i.
+std::vector<int> buildExtendedArray(const std::string &pattern,
+                                    const std::string &text,
+                                    const std::vector<int> &zPattern) {
+    const int patternLength = static_cast<int>(pattern.size());
+    const int textLength    = static_cast<int>(text.size());
+
+    std::vector<int> ext(textLength);
+    int left = 0, right = -1;                   // current [left, right] match window in text
+
+    for (int idx = 0; idx < textLength; ++idx) {
+        int currentMatchLen = 0;
+
+        // 1. potentially reuse knowledge from previous window
+        if (idx <= right) {
+            const int mirrored = idx - left;
+            currentMatchLen = std::min(zPattern[mirrored], right - idx + 1);
         }
-        while (k < m && i + k < n && eq_pat(P[k], T[i + k]))
-            k++;
-        ext[i] = k;
-        if (i + k - 1 > r) {
-            l = i;
-            r = i + k - 1;
+
+        // 2. explicit comparisons beyond what we already know
+        while (currentMatchLen < patternLength &&
+               idx + currentMatchLen < textLength &&
+               isWildcardMatch(pattern[currentMatchLen], text[idx + currentMatchLen])) {
+            ++currentMatchLen;
+        }
+        ext[idx] = currentMatchLen;
+
+        // 3. extend the current window if we improved it
+        if (idx + currentMatchLen - 1 > right) {
+            left  = idx;
+            right = idx + currentMatchLen - 1;
         }
     }
     return ext;
 }
 
-std::vector<int> find_matches(const std::string &P, const std::string &T) {
-    int m = P.size(), n = T.size();
-    std::vector<int> result;
+//--------------------------------------------------------------
+//  Top-level matching routine
+//--------------------------------------------------------------
+/// @brief Return all starting positions where pattern matches text under '?'.
+std::vector<int> findMatches(const std::string &pattern, const std::string &text) {
+    const int patternLength = static_cast<int>(pattern.size());
+    const int textLength    = static_cast<int>(text.size());
+    std::vector<int> matches;
 
-    if (std::count(P.begin(), P.end(), '?') == m) {
-        result.reserve(n - m + 1);
-        for (int i = 0; i + m <= n; i++) {
-            result.push_back(i);
+    // Trivial case: pattern is entirely wildcards – matches everywhere it fits.
+    if (std::count(pattern.begin(), pattern.end(), '?') == patternLength) {
+        matches.reserve(textLength - patternLength + 1);
+        for (int pos = 0; pos + patternLength <= textLength; ++pos) {
+            matches.push_back(pos);
         }
-        return result;
+        return matches;
     }
 
-    auto nxtF = build_next(P);
-    auto extF = build_ext(P, T, nxtF);
+    // Forward prefix matches
+    const auto zForward   = buildZArray(pattern);
+    const auto extForward = buildExtendedArray(pattern, text, zForward);
 
-    std::string Pr = P; std::reverse(Pr.begin(), Pr.end());
-    std::string Tr = T; std::reverse(Tr.begin(), Tr.end());
-    auto nxtRrev = build_next(Pr);
-    auto extRrev = build_ext(Pr, Tr, nxtRrev);
+    // Suffix matches by running the same on reversed strings
+    std::string patternReversed(pattern.rbegin(), pattern.rend());
+    std::string textReversed(text.rbegin(), text.rend());
 
-    std::vector<int> extR(n);
-    for (int i = 0; i < n; i++) {
-        extR[n - 1 - i] = extRrev[i];
+    const auto zReverse   = buildZArray(patternReversed);
+    const auto extReverse = buildExtendedArray(patternReversed, textReversed, zReverse);
+
+    // extReverse is aligned to reversed text; convert it so that extSuffix[i] = suffix length at position i.
+    std::vector<int> extSuffix(textLength);
+    for (int idx = 0; idx < textLength; ++idx) {
+        extSuffix[textLength - 1 - idx] = extReverse[idx];
     }
 
-    for (int i = 0; i + m <= n; i++) {
-        if (extF[i] + extR[i + m - 1] >= m) {
-            result.push_back(i);
+    // A position matches if its forward-prefix + backward-suffix cover the entire pattern.
+    for (int pos = 0; pos + patternLength <= textLength; ++pos) {
+        const int prefixLen  = extForward[pos];
+        const int suffixLen  = extSuffix[pos + patternLength - 1];
+        if (prefixLen + suffixLen >= patternLength) {
+            matches.push_back(pos);
         }
     }
-    return result;
+    return matches;
 }
 
-void print_positions(const std::vector<int> &pos) {
-    for (size_t j = 0; j < pos.size(); j++) {
-        if (j) std::cout << ' ';
-        std::cout << pos[j];
+//--------------------------------------------------------------
+//  I/O helpers
+//--------------------------------------------------------------
+void printPositions(const std::vector<int> &positions) {
+    for (std::size_t idx = 0; idx < positions.size(); ++idx) {
+        if (idx) std::cout << ' ';
+        std::cout << positions[idx];
     }
     std::cout << '\n';
 }
 
+//--------------------------------------------------------------
+//  Driver
+//--------------------------------------------------------------
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    std::string P, T;
-    std::getline(std::cin, P);
-    std::getline(std::cin, T);
+    std::string pattern;
+    std::string text;
+    std::getline(std::cin, pattern);
+    std::getline(std::cin, text);
 
-    auto positions = find_matches(P, T);
-    print_positions(positions);
+    const auto positions = findMatches(pattern, text);
+    printPositions(positions);
 
     return 0;
 }
